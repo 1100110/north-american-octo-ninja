@@ -1,0 +1,16 @@
+#!/usr/bin/env dash
+#This string is the highest process for cpu and it's cpu%
+GOOD=`top -b -n 1 \
+    | head -n 8 \
+    | tail -n 1 \
+    | awk '{ print $12" "$9"%" }'`
+
+# This one is faster, but totally not what I wanted...
+#HIGH=`ps -U $USER -o pcpu,comm  \
+#    | sort -k 1 -r \
+#    | head -n 2 \
+#    | tail -n 1 \
+#    | awk '{ print $1"% "$2 }'`
+
+
+echo $GOOD

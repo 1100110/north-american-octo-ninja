@@ -1,0 +1,68 @@
+#!/usr/bin/env zsh
+# Use the zshell!!
+
+#   WTF is this? come on now...
+if [[ $1 = "-acpu" ]]; then
+    ANS=`cut -d " " -f 1 /proc/loadavg`
+elif [[ $1 = "-bcpu" ]]; then
+    ANS=`cut -d " " -f 2 /proc/loadavg`
+elif [[ $1 = "-ccpu" ]]; then
+    ANS=`cut -d " " -f 3 /proc/loadavg`
+elif [[ $1 = "-mem" ]]; then
+    ANS=`head -n 2 /proc/meminfo | awk '{printf $2 " " getline; print $2}' | cut -d " " -f 2`
+    # ANS=`echo "$ANW / 1024" | bc`  This is here to attempt to convert to megabytes.
+elif [[ $1 = "-highcpu" ]]; then
+    ANS=`top -b -n 1 \
+        | head -n 8 \
+        | tail -n 1 \
+        | awk '{ print $12" "$9"%" }'`
+else
+    echo -n "Dude.  Totally not something I recognize..."
+fi
+
+echo "$ANS"
+
+local help()    {
+    echo "Usage:"
+    echo "  cpumem -[abc]cpu -mem -highcpu -highmem -help"
+    echo "-[abc]cpu     |   Get one or more of the three load averages"
+    echo "-mem          |   Get the current amount of free memory."
+    echo "              |   This will differ from 'free', but is similar to htop"
+    echo "-highcpu      |   Get the name of the process using the most cpu"
+    echo "-help         |   print this table.  lol."
+}
+
+##  This is a pretty fast way to get the current load averages.
+#       It only takes about ~50ms to return an answer.
+local loadAverage() {
+    ANS+=`cut -d " " -f $1 /proc/loadavg`
+}
+
+##  This is also pretty fast as well.
+local memFree() {
+    ANS+=`head -n 2 /proc/meminfo | awk '{ printf $2 " " getline; print $2 }' | cut -d " " -f 2`
+}
+
+##  This one is slow as balls.  ~500ms to get a response.
+#   Be carefull where it's used.  If used for zsh prompt, you're gonna have a bad time.
+#   But, tmux is fine.  Unless something is actually using the cpu you might get random procs
+#   from the random spikes.
+local cpuHigh() {
+    ANS+=`top -b -n 1 \
+        | head -n 8 \
+        | tail -n 1 \
+        | awk '{ print $12" "$9"%" }'`
+}
+
+##  Kinda a weird one, I haven't fully figured out all of the differences 
+#   That make this one not what I want.
+#   It shows the sytem time used by a program since boot.
+#   Not really useful for what I wanted.
+#   On the upside it's pretty fast.
+local psCpu()    {
+    ANS+=`ps -U $USER -o pcpu,comm  \
+            | sort -k 1 -r \
+            | head -n 2 \
+            | tail -n 1 \
+            | awk '{ print $1"% "$2 }'`
+}
