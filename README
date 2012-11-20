@@ -1,1 +1,331 @@
-Place Session Files/Extra tmux-specific files in the directory.
+/**
+ * A simple DLL wrapper
+ *
+ * Dynamically loads a dll and makes dll functions accessible as methods.
+ *
+ * Part of the code has a Copyright (c) 2007 by Wei Li. Li's original version,
+ * which also supports Linux so libraries, can be found
+ * <a href="http://dotmars.googlecode.com/svn/trunk/dotmars/runtime/dll.d">
+ * here</a>.
+ *
+ * Example:
+ *  -----------------
+ *  import dllloader;
+ *  import std.c.windows.windows;
+ *
+ *  void main() {
+ *      // define functions
+ *      alias Function!("MessageBoxW", int function(HWND, LPCWSTR, LPCWSTR, UINT)) mbw;
+ *      alias Function!("MessageBoxA", int function(HWND, LPCSTR, LPCSTR, UINT)) mba;
+ *      // load dll
+ *      auto user32 = new Dll!("User32.dll", mbw, mba);
+ *      // call functions
+ *      user32.MessageBoxA(null, "Hello", "MessageBoxA", 0);
+ *  }
+ *  -----------------
+ *
+ * Bugs:
+ *  $(UL
+ *   $(LI Due to <a href="http://d.puremagic.com/issues/show_bug.cgi?id=4793">
+ *    bug 4793</a> the code currently fails for Unicode paths. I suggest to use
+ *    the patch supplied with the bug report if need be. Alternatively, the
+ *    client code has to manually encode for the correct locale at the moment.)
+ * )
+ *
+ * Authors: Wei Li, stephan
+ *
+ * Date: 2010-09-30
+ *
+ * Version: 0.1
+ *
+ * License: BSD
+ */
+module tests.dllloader;
+
+version(Windows) {
+
+import core.runtime;
+import std.c.windows.windows;
+import std.conv;
+import std.string;
+import std.traits;
+
+
+/**
+ * Struct encapsulating function declarations
+ *
+ * These are function declarations as found in the respective dll.
+ *
+ * A new $(D Function) struct takes two template parameters.
+ * The first is the name of the new symbol (the function name). The
+ * second is the actual function type (signature). There is an optional
+ * third template parameter that can be used to change the calling
+ * convention e.g. to "C" if a dll requires that. The default is "Windows"
+ * as needed for standard windows system dlls like "User32.dll".
+ *
+ * Example:
+ *  ---------------
+ *  // MessageBoxA in Windows User32.dll
+ *  alias Function!("MessageBoxA", int function(HWND, LPCSTR, LPCSTR, UINT)) mba;
+ *  ---------------
+ */
+struct Function(string funcname, Func, string cc = "Windows") {
+    const string name = funcname;
+    mixin("alias extern(" ~ cc ~ ") ReturnType!(Func) "
+          "function(ParameterTypeTuple!(Func)) FunctionType;" );
+}
+
+
+/**
+ * Dynamically load dll and bind functions.
+ *
+ * Dynamically loads a dll and exports the functions that have been declared.
+ *
+ * Example:
+ *  -----------------
+ *  alias Function!("MessageBoxA", int function(HWND, LPCSTR, LPCSTR, UINT)) mba;
+ *  auto user32 = new Dll!("User32.dll", mba);
+ *  user32.MessageBoxA(null, "Hello!", "MessageBoxA", 0);
+ *  -----------------
+ */
+final class Dll(string Path, Functions...) {
+
+    /**
+     * Constructor dynamically loads a dll.
+     *
+     * The constructor takes two or more template parameters. The first template
+     * parameter is the name (and possibly the path) of the dll. The other
+     * template parameters are $(D Function) structs for the
+     * functions to be imported.
+     *
+     * If the constructor throws, you have no valid dll. Using it results in
+     * access violations.
+     *
+     * Params:
+     *  throwNotBound = optional, default true. If true, throws on construction
+     *      if a function cannot be found. If false, ignores errors. A function
+     *      that could not be bound will be $(D null). Hence a simple
+     *      check whether dll.functionName is null tells whether a function
+     *      could not be bound if $(D throwNotBound == false).
+     *
+     *
+     * Throws:
+     * $( UL
+     *  $(LI $(D LibraryNotLoaded) on construction if it could not
+     *    find the library.)
+     *  $(LI $(D FunctionNotBound) on construction if binding of
+     *    function failed unless $(D throwNotBound == false).)
+     * )
+     *
+     * Example:
+     *  ---------------
+     *  Dll!("User32.dll", mba) user32 = new Dll!("User32.dll", mba);
+     *  ---------------
+     */
+    this(in bool throwNotBound = true) {
+        this.throwNotBound = throwNotBound;
+        load();
+        scope(failure) close();
+        initFunctions();
+    }
+
+    /**
+     * Destructor unloads dll
+     */
+    ~this() { close(); }
+
+    /**
+     * Unload the dll.
+     *
+     * After a call to the close method all dll methods are set to null
+     * so that future access will throw an assertion error.
+     */
+    void close() {
+        if (!hdl) return;
+        scope(exit) hdl = null;
+        Runtime.unloadLibrary(hdl);
+        // set functions to null to help debugging. Otherwise, calls to
+        // functions might still succeed after close if the library stays loaded
+        // (e.g. there is another reference), leading to hard-to-find bugs
+        foreach (S; Functions) mixin(S.name ~ " = null;");
+    }
+
+    mixin MixinMembers!(Functions);
+
+private:
+    HANDLE hdl = null;                // handle to dll
+    bool throwNotBound = true;
+
+    // load dll and bind functions
+    void load() {
+        hdl = cast(HANDLE) Runtime.loadLibrary(Path);
+        if (!hdl) {
+            auto err = GetLastError();
+            string msg = "System error code " ~ to!string(err) ~ " loading dll "
+                         "(see http://msdn.microsoft.com/en-us/library/ms681381"
+                         "%28v=VS.85%29.aspx)";
+            throw new LibraryNotLoaded(msg);
+        }
+    }
+
+    // called to initialize all functions
+    void initFunctions() {
+        foreach (S; Functions) {
+            mixin(S.name ~ " = getFunction!(FP_" ~ S.name ~ ")(S.name);");
+        }
+    }
+
+    // function dispatcher
+    T getFunction(T)(string name) {
+        T ptr = cast(T)GetProcAddress(hdl, toStringz(name));
+        if ((!ptr) && throwNotBound) throw new FunctionNotBound(name);
+        return ptr;
+    }
+}
+
+
+/**
+ * Base class for all exceptions
+ */
+abstract class DllException : Exception { mixin ExceptionCtorMixin; }
+
+
+/**
+ * Thrown if the library could not be loaded of if code tries to access
+ * method after calling close
+ */
+class LibraryNotLoaded : DllException { mixin ExceptionCtorMixin; }
+
+
+/**
+ * Thrown if code tries to access a function that could not be bound.
+ */
+class FunctionNotBound : DllException { mixin ExceptionCtorMixin; }
+
+
+/* ****************************************************************************
+ * Mixin provides the *standard* ctors boilerplate code for the exceptions.
+ */
+public mixin template ExceptionCtorMixin() {
+    /* *
+     * Params:
+     *  msg     = error message
+     *  next    = next exception in the chain of exceptions
+     */
+    this(string msg = null, Throwable next = null) { super(msg, next); }
+
+    /* *
+     * Params:
+     *  msg     = error message
+     *  file    = name of the file where the exception was thrown
+     *  line    = line in the file where the exception was thrown
+     *  next    = next exception in the chain of exceptions
+     */
+    this(string msg, string file, size_t line, Throwable next = null) {
+        super(msg, file, line, next);
+    }
+}
+
+
+private:
+
+// Mixin adding dll functions to Dll class.
+template MixinMembers(S, V...) {
+    private mixin("alias S.FunctionType FP_" ~ S.name ~ ";");
+    mixin("S.FunctionType " ~ S.name ~ ";");
+    static if (V.length) mixin MixinMembers!(V);
+}
+
+
+/* *****************************************************************************
+ * Unit tests
+ */
+// TODO: add proper unit test. Have to mock LoadLibrary etc.
+
+version(unittest) {
+
+import std.algorithm: startsWith;
+
+T assertThrows(T)(scope void delegate() func, in string msg, bool exact=true) {
+    try {
+        func();
+        assert(false, T.stringof ~ " not raised: " ~ msg);
+    } catch (T exc) {
+        if (exact && (typeid(T) != typeid(exc)))
+            assert(false, T.stringof ~ " incorrectly raised: " ~ msg);
+        return exc;
+    }
+}
+} // version(unittest)
+
+
+// function test
+unittest {
+    alias Function!("GetCurrentDirectoryA", DWORD function(DWORD, LPTSTR)) gcd;
+    alias Function!("SetDllDirectoryA", BOOL function(LPCTSTR)) sdd;
+    auto kernel32 = new Dll!("Kernel32.dll", gcd, sdd);
+    // get required buffer length for current directory
+    assert(kernel32.GetCurrentDirectoryA);
+    auto size = kernel32.GetCurrentDirectoryA(0, null);
+    assert(size);
+    // allocate buffer and get directory
+    char[] buf = new char[size+1];
+    kernel32.GetCurrentDirectoryA(size, buf.ptr);
+    assert(buf);
+    // call second function
+    assert(kernel32.SetDllDirectoryA);
+    assert(kernel32.SetDllDirectoryA(""));
+    assert(kernel32.SetDllDirectoryA(null));
+}
+
+
+// close method
+unittest {
+    alias Function!("GetCurrentDirectoryA", DWORD function(DWORD, LPTSTR)) gcd;
+    alias Function!("SetDllDirectoryA", BOOL function(LPCTSTR)) sdd;
+    auto kernel32 = new Dll!("Kernel32.dll", gcd, sdd);
+    // check existence of functions
+    assert(kernel32.GetCurrentDirectoryA);
+    assert(kernel32.SetDllDirectoryA);
+    // close
+    kernel32.close();
+    // check unload
+    assert(!kernel32.GetCurrentDirectoryA);
+    assert(!kernel32.SetDllDirectoryA);
+}
+
+
+/* this unit test is typically not needed. It "prints" a message
+unittest {
+    alias Function!("MessageBoxA", int function(HWND, LPCSTR, LPCSTR, UINT)) mba;
+    auto user32 = new Dll!("User32.dll", mba);
+    user32.MessageBoxA(null, "Hello!", "Unit test", 0);
+}*/
+
+
+// error: dll doesn't exist
+unittest {
+    alias Function!("notThere", int function()) nt;
+    Dll!("Unknown", nt) user32;
+
+    auto exc = assertThrows!LibraryNotLoaded({new Dll!("Unknown", nt);}, "");
+}
+
+
+// error: function does not exist
+unittest {
+    alias Function!("notThere", void function()) nt;
+    Dll!("User32.dll", nt) user32;
+
+    auto exc = assertThrows!FunctionNotBound({new Dll!("User32.dll", nt);}, "");
+}
+
+
+// throwNotBound = false -> ignore binding errors
+unittest {
+    alias Function!("notThere", void function()) nt;
+    Dll!("User32.dll", nt) user32;
+    user32 = new Dll!("User32.dll", nt)(false);
+    assert(!user32.notThere);
+}
+} // version(Windows)
